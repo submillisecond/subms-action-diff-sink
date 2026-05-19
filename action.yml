@@ -36,7 +36,7 @@ inputs:
 
   # ----- text / generic ----------------------------------------------
   webhook-url:
-    description: 'For `slack` and `http` sinks: target URL. Use `${{ secrets.SLACK_WEBHOOK }}`.'
+    description: "For `slack` and `http` sinks: target URL. Pass a `$${{ secrets.SLACK_WEBHOOK }}` reference from your workflow."
     required: false
     default: ""
   http-method:
