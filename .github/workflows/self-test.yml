@@ -1,0 +1,142 @@
+name: self-test
+
+on:
+  push:
+  pull_request:
+
+# Exercise subms-action-diff-sink with safe sinks (stdout, file). We avoid
+# network sinks here so the self-test runs offline / hermetically. The
+# network sinks (slack/datadog/prometheus/etc) are smoke-tested via
+# fail-soft semantics: bad URL -> exit 0 unless fail-on-sink-error: true.
+
+jobs:
+  stdout-sink:
+    name: stdout sink emits one JSON line per row
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage a SubMsBenchSummary
+        run: |
+          cat > summary.json << 'EOF'
+          {
+            "workload":"x","lang":"rust","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},
+            "stages":{"put":{"count":1,"p50_ns":100,"p99_ns":200,"p999_ns":300,"max_ns":400,"mean_ns":150,"samples_ns":[]}}
+          }
+          EOF
+
+      - name: Sink to stdout
+        id: sink
+        uses: ./
+        with:
+          input: summary.json
+          sink: stdout
+          tags: '{"service":"orderbook"}'
+
+      - name: Assert push reported
+        run: |
+          [ "${{ steps.sink.outputs.pushed }}" = "true" ] || { echo "expected pushed=true"; exit 1; }
+          [ "${{ steps.sink.outputs.sink }}" = "stdout" ] || { echo "expected sink=stdout"; exit 1; }
+
+  file-sink-append:
+    name: file sink accumulates rows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage a diff JSON
+        run: |
+          cat > diff.json << 'EOF'
+          {
+            "baseline_workload":"x","candidate_workload":"x","lang":"rust",
+            "regression_threshold_pct":15,"per_stage_thresholds":{},"has_regression":false,
+            "stages":[{"stage":"put","worst_regression_pct":2,"metrics":[
+              {"metric":"p99","baseline_ns":100,"candidate_ns":102,"delta_ns":2,"delta_pct":2}
+            ]}],
+            "baseline_only_stages":[],"candidate_only_stages":[]
+          }
+          EOF
+
+      - name: Sink to file
+        id: sink
+        uses: ./
+        with:
+          input: diff.json
+          sink: file
+          file-path: perf-feed.jsonl
+
+      - name: Assert file written
+        run: |
+          test -s perf-feed.jsonl
+          LINES=$(wc -l < perf-feed.jsonl)
+          [ "$LINES" -ge 1 ] || { echo "expected >=1 line, got $LINES"; exit 1; }
+          # Each line must be parseable JSON.
+          while IFS= read -r line; do
+            echo "$line" | jq -e '.stage and .metric' > /dev/null
+          done < perf-feed.jsonl
+
+  multi-sink-isolation:
+    name: bad slack URL + good stdout -> stdout still fires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage minimal input
+        run: |
+          cat > summary.json << 'EOF'
+          {"workload":"x","lang":"r","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},"stages":{"put":{"count":1,"p50_ns":1,"p99_ns":1,"p999_ns":1,"max_ns":1,"mean_ns":1,"samples_ns":[]}}}
+          EOF
+
+      - name: Multi-sink (slack will fail, stdout will succeed)
+        id: sink
+        uses: ./
+        with:
+          input: summary.json
+          sink: "slack,stdout"
+          webhook-url: "http://127.0.0.1:1/dead"
+          fail-on-sink-error: "false"
+
+      - name: Assert isolation
+        run: |
+          [ "${{ steps.sink.outputs.pushed }}" = "true" ] || { echo "expected at least stdout to succeed"; exit 1; }
+          # failed-sinks should include slack
+          case "${{ steps.sink.outputs.failed-sinks }}" in
+            *slack*) ;;
+            *) echo "expected slack in failed-sinks, got '${{ steps.sink.outputs.failed-sinks }}'"; exit 1 ;;
+          esac
+          # sink output should include stdout
+          case "${{ steps.sink.outputs.sink }}" in
+            *stdout*) ;;
+            *) echo "expected stdout in sink output, got '${{ steps.sink.outputs.sink }}'"; exit 1 ;;
+          esac
+
+  only-on-regression-skips:
+    name: only-on-regression skips when no regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage a non-regressing diff
+        run: |
+          cat > diff.json << 'EOF'
+          {
+            "baseline_workload":"x","candidate_workload":"x","lang":"rust",
+            "regression_threshold_pct":15,"per_stage_thresholds":{},"has_regression":false,
+            "stages":[{"stage":"put","worst_regression_pct":1,"metrics":[
+              {"metric":"p99","baseline_ns":100,"candidate_ns":101,"delta_ns":1,"delta_pct":1}
+            ]}],
+            "baseline_only_stages":[],"candidate_only_stages":[]
+          }
+          EOF
+
+      - name: Sink with only-on-regression
+        id: sink
+        uses: ./
+        with:
+          input: diff.json
+          sink: stdout
+          only-on-regression: "true"
+
+      - name: Assert skipped
+        run: |
+          [ "${{ steps.sink.outputs.pushed }}" = "false" ] || { echo "expected pushed=false (skipped)"; exit 1; }

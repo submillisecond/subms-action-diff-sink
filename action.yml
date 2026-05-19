@@ -1,0 +1,192 @@
+name: subms-action-diff-sink
+description: |
+  Push a `subms-diff.json` (or any compatible perf JSON) to one or more
+  external sinks. Built-in sinks:
+
+    text-only:        slack, file, stdout
+    HTTP/REST:        http (alias: rest), splunk, newrelic, honeycomb
+    cloud storage:    s3, gcs, azure   (presigned URL PUT)
+    metrics systems:  prometheus, influxdb, datadog
+
+  Designed to be chained after `subms-action-diff` or `subms-action-diff-aggregate`, so
+  regression data leaves CI for downstream observability (paging on
+  regressions, weekly trend charts, archive in S3, etc).
+
+  Supports comma-separated multi-sink dispatch:
+    sink: "slack,prometheus,s3"
+  Each sink runs independently; one failure doesn't suppress the others
+  (and by default doesn't fail the action either - set
+  `fail-on-sink-error: "true"` for hard CI errors).
+
+
+branding:
+  icon: 'share-2'
+  color: 'blue'
+
+inputs:
+  input:
+    description: Path to the perf JSON / diff JSON to forward. Either a subms-diff.json or a SubMsBenchSummary-shape file works.
+    required: true
+  sink:
+    description: |
+      One sink name or a comma-separated list. Available:
+      `slack`, `http` (alias `rest`), `prometheus`, `influxdb`, `datadog`,
+      `stdout`, `file`, `s3`, `gcs`, `azure`, `splunk`, `newrelic`, `honeycomb`.
+    required: true
+
+  # ----- text / generic ----------------------------------------------
+  webhook-url:
+    description: 'For `slack` and `http` sinks: target URL. Use `${{ secrets.SLACK_WEBHOOK }}`.'
+    required: false
+    default: ""
+  http-method:
+    description: 'For `http`: HTTP method. Default POST.'
+    required: false
+    default: "POST"
+  http-headers:
+    description: 'For `http`: JSON object of extra headers.'
+    required: false
+    default: ""
+  file-path:
+    description: 'For `file` sink: append-target path. Multiple runs accumulate (one JSON object per row, newline-delimited).'
+    required: false
+    default: ""
+
+  # ----- cloud object storage ----------------------------------------
+  s3-url:
+    description: 'For `s3` sink: presigned PUT URL. Generate with `aws s3 presign` or boto3.'
+    required: false
+    default: ""
+  gcs-url:
+    description: 'For `gcs` sink: V4 signed PUT URL. Generate with `gcloud storage sign-url`.'
+    required: false
+    default: ""
+  azure-url:
+    description: 'For `azure` sink: SAS-token PUT URL. Generate with `az storage blob generate-sas`.'
+    required: false
+    default: ""
+
+  # ----- metrics systems --------------------------------------------
+  prometheus-pushgateway:
+    description: 'For `prometheus`: pushgateway base URL (e.g. `http://gateway:9091`).'
+    required: false
+    default: ""
+  prometheus-job:
+    description: 'For `prometheus`: job label.'
+    required: false
+    default: "subms-diff"
+  influx-url:
+    description: 'For `influxdb`: write API URL (e.g. `https://influx/api/v2/write?org=acme&bucket=perf&precision=ns`).'
+    required: false
+    default: ""
+  influx-token:
+    description: 'For `influxdb`: API token. Use a secret.'
+    required: false
+    default: ""
+  datadog-api-key:
+    description: 'For `datadog`: API key. Use a secret.'
+    required: false
+    default: ""
+  datadog-site:
+    description: 'For `datadog`: site (default `datadoghq.com`; `datadoghq.eu` for EU).'
+    required: false
+    default: "datadoghq.com"
+
+  # ----- enterprise observability ------------------------------------
+  splunk-url:
+    description: 'For `splunk`: HEC endpoint (e.g. `https://splunk:8088/services/collector`).'
+    required: false
+    default: ""
+  splunk-token:
+    description: 'For `splunk`: HEC token. Use a secret.'
+    required: false
+    default: ""
+  newrelic-license-key:
+    description: 'For `newrelic`: license key (a.k.a. ingest key). Use a secret.'
+    required: false
+    default: ""
+  newrelic-region:
+    description: 'For `newrelic`: `us` (default) or `eu`.'
+    required: false
+    default: "us"
+  honeycomb-api-key:
+    description: 'For `honeycomb`: team API key. Use a secret.'
+    required: false
+    default: ""
+  honeycomb-dataset:
+    description: 'For `honeycomb`: dataset name.'
+    required: false
+    default: ""
+  honeycomb-region:
+    description: 'For `honeycomb`: `us` (default) or `eu`.'
+    required: false
+    default: "us"
+
+  # ----- shared options ----------------------------------------------
+  metric-prefix:
+    description: 'Prefix prepended to metric names sent to Prometheus / InfluxDB / Datadog / New Relic.'
+    required: false
+    default: "subms_perf"
+  tags:
+    description: |
+      JSON object of static tags / labels merged into every emitted metric / event.
+      Example: `{"service":"orderbook","env":"prod","commit":"abc123"}`.
+    required: false
+    default: ""
+  only-on-regression:
+    description: |
+      "true" to skip the push when the diff JSON's `has_regression` is false
+      (or no `has_regression` field is present). Useful for paging sinks
+      like Slack/PagerDuty.
+    required: false
+    default: "false"
+  fail-on-sink-error:
+    description: '"false" (default) keeps the action soft - a flaky webhook does not break the gate.'
+    required: false
+    default: "false"
+
+outputs:
+  pushed:
+    description: '"true" when at least one sink received the payload; "false" when all sinks were skipped or failed.'
+    value: ${{ steps.sink.outputs.pushed }}
+  sink:
+    description: Comma-separated list of sinks that succeeded.
+    value: ${{ steps.sink.outputs.sink }}
+  failed-sinks:
+    description: Comma-separated list of sinks that failed (empty when all succeeded).
+    value: ${{ steps.sink.outputs.failed-sinks }}
+
+runs:
+  using: composite
+  steps:
+    - name: Push to sink(s)
+      id: sink
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.input }}
+        SINK: ${{ inputs.sink }}
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        HTTP_METHOD: ${{ inputs.http-method }}
+        HTTP_HEADERS: ${{ inputs.http-headers }}
+        FILE_PATH: ${{ inputs.file-path }}
+        S3_URL: ${{ inputs.s3-url }}
+        GCS_URL: ${{ inputs.gcs-url }}
+        AZURE_URL: ${{ inputs.azure-url }}
+        PROMETHEUS_PUSHGATEWAY: ${{ inputs.prometheus-pushgateway }}
+        PROMETHEUS_JOB: ${{ inputs.prometheus-job }}
+        INFLUX_URL: ${{ inputs.influx-url }}
+        INFLUX_TOKEN: ${{ inputs.influx-token }}
+        DATADOG_API_KEY: ${{ inputs.datadog-api-key }}
+        DATADOG_SITE: ${{ inputs.datadog-site }}
+        SPLUNK_URL: ${{ inputs.splunk-url }}
+        SPLUNK_TOKEN: ${{ inputs.splunk-token }}
+        NEWRELIC_LICENSE_KEY: ${{ inputs.newrelic-license-key }}
+        NEWRELIC_REGION: ${{ inputs.newrelic-region }}
+        HONEYCOMB_API_KEY: ${{ inputs.honeycomb-api-key }}
+        HONEYCOMB_DATASET: ${{ inputs.honeycomb-dataset }}
+        HONEYCOMB_REGION: ${{ inputs.honeycomb-region }}
+        METRIC_PREFIX: ${{ inputs.metric-prefix }}
+        TAGS: ${{ inputs.tags }}
+        ONLY_ON_REGRESSION: ${{ inputs.only-on-regression }}
+        FAIL_ON_SINK_ERROR: ${{ inputs.fail-on-sink-error }}
+      run: node ${{ github.action_path }}/sink.js

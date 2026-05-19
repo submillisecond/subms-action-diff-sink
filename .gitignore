@@ -1,0 +1,19 @@
+# Action runtime artifacts
+subms-diff.json
+subms-diff.md
+subms-diff-aggregate.json
+subms-diff-aggregate.md
+subms-drift.json
+subms-drift.md
+
+# Node
+node_modules/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
